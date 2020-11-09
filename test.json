@@ -1,0 +1,14 @@
+{
+    "Pods": [
+        {
+           "Name": "kube-proxy-jggvf",
+            "Namespace": "kube-system"
+        },
+        {
+            "Name": "coredns-869cb84759-6xqhv",
+            "Namespace": "kube-system"
+        }
+    ],
+    "Duration": "15"
+}        
+
