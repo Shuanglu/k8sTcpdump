@@ -204,7 +204,7 @@ func watchPodStatus(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) wait.
 		wpod, err := client.CoreV1().Pods(tcpdumpPod.ObjectMeta.Namespace).Get(context.TODO(), tcpdumpPod.ObjectMeta.Name, metav1.GetOptions{})
 		if err != nil {
 			log.Warn(fmt.Sprintf("Failed to get the pod '%s' in the namespace '%s'. Will exit.", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
-			log.Fatal(err)
+
 			//return false, err
 		}
 		if wpod.Status.Phase == "Running" {
@@ -288,24 +288,64 @@ func downloadFromPod(restConfig *rest.Config, client *kubernetes.Clientset, tcpd
 
 func cleanUp(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) error {
 	log.Info(fmt.Sprintf("Cleanup the Pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+	//var GracePeriodSeconds int64
+	//GracePeriodSeconds = 0
 	err := client.CoreV1().Pods(tcpdumpPod.ObjectMeta.Namespace).Delete(context.TODO(), tcpdumpPod.ObjectMeta.Name, metav1.DeleteOptions{})
 	return err
 }
 
+//func watchPodStatus(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) bool {
+//	listOption := "metadata.name=" + tcpdumpPod.ObjectMeta.Name
+//	podWatcher, err := client.CoreV1().Pods(tcpdumpPod.ObjectMeta.Namespace).Watch(context.TODO(), metav1.ListOptions{
+//		FieldSelector: listOption})
+//	if err != nil {
+//		log.Warn(fmt.Sprintf("Failed to get the status of the pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+//	}
+//var podWatcherRes struct
+//	podWatcherEvent := <-podWatcher.ResultChan()
+//	log.Info(podWatcherEvent.Type)
+//	if podWatcherEvent.Type == "MODIFIED" {
+//		return true
+//	}
+//	return false
+//}
+
 func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, targetPod *target, duration string, sleepTime time.Duration) error {
 	defer workerGroup.Done()
-	tcpdumpPod, res := createPod(client, targetPod, duration)
-	if res == nil {
-		res = wait.PollImmediate(1, sleepTime, watchPodStatus(client, tcpdumpPod))
-		if res != nil {
+	tcpdumpPod, err := createPod(client, targetPod, duration)
+	if err == nil {
+
+		err = wait.PollImmediate(time.Second*1, sleepTime, watchPodStatus(client, tcpdumpPod))
+		//for {
+		//if modified := watchPodStatus(client, tcpdumpPod); modified == true {
+		//	tcpdumpPod, err := client.CoreV1().Pods(tcpdumpPod.ObjectMeta.Namespace).Get(context.TODO(), tcpdumpPod.ObjectMeta.Name, metav1.GetOptions{})
+		//	if err != nil {
+		//		log.Warn(fmt.Sprintf("Failed to get the pod '%s' in the namespace '%s'. Will EXIT.", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+		//		log.Fatal(err)
+		//return false, err
+		//	}
+		//	if tcpdumpPod.Status.Phase == "Running" {
+		//		if tcpdumpPod.Status.Conditions[1].Type == apicore.PodReady {
+		//			if tcpdumpPod.Status.Conditions[1].Status == apicore.ConditionTrue {
+		//				log.Info(fmt.Sprintf("Tcpdump process in the Pod '%s' in the namesapce '%s' has completed now", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+		//				break
+		//			}
+		//		}
+		//	}
+		//}
+		//}
+
+		if err != nil {
 			log.Warn(fmt.Sprintf("Timeout while waiting tcpdump for pod '%s' in the namespace '%s' to complete", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+			//log.Fatal(err)
+		} else {
+			err = downloadFromPod(restConfig, client, tcpdumpPod)
+			if err != nil {
+				log.Warn(fmt.Sprintf("Failed to download dump file from pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+			}
 		}
-		res = downloadFromPod(restConfig, client, tcpdumpPod)
-		if res != nil {
-			log.Warn(fmt.Sprintf("Failed to download dump file from pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
-		}
-		res = cleanUp(client, tcpdumpPod)
-		if res != nil {
+		err = cleanUp(client, tcpdumpPod)
+		if err != nil {
 			log.Warn(fmt.Sprintf("Failed to clean up the pod '%s'", tcpdumpPod.ObjectMeta.Name))
 		}
 	}
