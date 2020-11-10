@@ -1,8 +1,8 @@
 {
     "Pods": [
         {
-           "Name": "kube-proxy-jggvf",
-            "Namespace": "kube-system"
+            "Name": "test",
+            "Namespace": "default"
         },
         {
             "Name": "coredns-869cb84759-6xqhv",

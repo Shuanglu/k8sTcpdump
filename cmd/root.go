@@ -81,7 +81,7 @@ func dropErr(e error) {
 }
 
 func getPodStatus(client *kubernetes.Clientset, data *targets) *[]target {
-	var tPods []target
+	var targetPods []target
 	for i := 0; i < len(data.Pods); i++ {
 		pod, err := client.CoreV1().Pods(data.Pods[i].Namespace).Get(context.TODO(), data.Pods[i].Name, metav1.GetOptions{})
 		podName := pod.ObjectMeta.Name
@@ -101,16 +101,16 @@ func getPodStatus(client *kubernetes.Clientset, data *targets) *[]target {
 				if data.Pods[i].Node != podNode {
 					log.Info(fmt.Sprintf("Node of Pod '%s' in the namespace '%s' is different/missing from the input. Use the latest one %s", podName, data.Pods[i].Namespace, podNode))
 				}
-				var spod target
-				spod.Name = podName
-				spod.Node = podNode
-				spod.Namespace = pod.Namespace
-				spod.Uid = podUid
-				tPods = append(tPods, spod)
+				var targetPod target
+				targetPod.Name = podName
+				targetPod.Node = podNode
+				targetPod.Namespace = pod.Namespace
+				targetPod.Uid = podUid
+				targetPods = append(targetPods, targetPod)
 			}
 		}
 	}
-	return &tPods
+	return &targetPods
 }
 
 func parse(p string) (*rest.Config, *kubernetes.Clientset, *targets) {
@@ -150,7 +150,7 @@ func getPodDef(pod *target, duration string) *apicore.Pod {
 	privileged = true
 	var command string
 	var probeCommand []string
-	command = "rm /tmp/" + pod.Name + "_" + pod.Namespace + ".cap && rm /tmp/complete-" + pod.Name + "_" + pod.Namespace + " && nsenter -t $(docker inspect $(docker ps |grep '" + pod.Uid + "'|grep -v pause|awk '{print $1}')| grep '\"Pid\":' | grep -Eo '[0-9]*') -n timeout " + duration + " tcpdump -i any -w /tmp/" + pod.Name + "_" + pod.Namespace + ".cap; touch /tmp/complete-" + pod.Name + "_" + pod.Namespace + " && tail -f /dev/null"
+	command = "rm -rf /tmp/" + pod.Name + "_" + pod.Namespace + ".cap; rm -rf /tmp/complete-" + pod.Name + "_" + pod.Namespace + "; nsenter -t $(docker inspect $(docker ps |grep '" + pod.Uid + "'|grep -v pause|awk '{print $1}')| grep '\"Pid\":' | grep -Eo '[0-9]*') -n timeout " + duration + " tcpdump -i any -w /tmp/" + pod.Name + "_" + pod.Namespace + ".cap; sleep 2;touch /tmp/complete-" + pod.Name + "_" + pod.Namespace + "; tail -f /dev/null"
 	probeCommand = []string{"ls", "/tmp/complete-" + pod.Name + "_" + pod.Namespace}
 	return &apicore.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -219,11 +219,13 @@ func watchPodStatus(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) wait.
 	}
 }
 
-func createPod(client *kubernetes.Clientset, podManifest *target, duration string) (*apicore.Pod, error) {
-	podDefinition := getPodDef(podManifest, duration)
+func createPod(client *kubernetes.Clientset, targetPod *target, duration string) (*apicore.Pod, error) {
+	podDefinition := getPodDef(targetPod, duration)
 	tcpdumpPod, err := client.CoreV1().Pods(podDefinition.ObjectMeta.Namespace).Create(context.TODO(), podDefinition, metav1.CreateOptions{})
 	if err == nil {
 		log.Info(fmt.Sprintf("Pod '%s' in the namespace '%s' has been created.", tcpdumpPod.Name, tcpdumpPod.Namespace))
+	} else {
+		log.Warn(fmt.Sprintf("Pod '%s' in the namespace '%s' failed to be created due to '%s'.", podDefinition.ObjectMeta.Name, podDefinition.ObjectMeta.Namespace, err.Error()))
 	}
 	return tcpdumpPod, err
 }
@@ -290,28 +292,30 @@ func cleanUp(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) error {
 	return err
 }
 
-func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, podManifest *target, duration string, sleepTime time.Duration) error {
+func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, targetPod *target, duration string, sleepTime time.Duration) error {
 	defer workerGroup.Done()
-	tcpdumpPod, res := createPod(client, podManifest, duration)
-	res = wait.PollImmediate(1, sleepTime, watchPodStatus(client, tcpdumpPod))
-	if res != nil {
-		log.Warn(fmt.Sprintf("Timeout while waiting tcpdump for pod '%s' in the namespace '%s' to complete", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
-	}
-	res = downloadFromPod(restConfig, client, tcpdumpPod)
-	if res != nil {
-		log.Warn(fmt.Sprintf("Failed to download dump file from pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+	tcpdumpPod, res := createPod(client, targetPod, duration)
+	if res == nil {
+		res = wait.PollImmediate(1, sleepTime, watchPodStatus(client, tcpdumpPod))
+		if res != nil {
+			log.Warn(fmt.Sprintf("Timeout while waiting tcpdump for pod '%s' in the namespace '%s' to complete", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+		}
+		res = downloadFromPod(restConfig, client, tcpdumpPod)
+		if res != nil {
+			log.Warn(fmt.Sprintf("Failed to download dump file from pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+		}
+		res = cleanUp(client, tcpdumpPod)
+		if res != nil {
+			log.Warn(fmt.Sprintf("Failed to clean up the pod '%s'", tcpdumpPod.ObjectMeta.Name))
+		}
 	}
 
-	//res = cleanUp(client, tcpdumpPod)
-	if res != nil {
-		log.Warn(fmt.Sprintf("Failed to clean up the pod '%s'", tcpdumpPod.ObjectMeta.Name))
-	}
 	return nil
 }
 
 func run(parFile string) {
-	restConfig, client, datap := parse(parFile)
-	duration := *&datap.Duration
+	restConfig, client, targetPodsp := parse(parFile)
+	duration := *&targetPodsp.Duration
 	durationInt1, err := strconv.Atoi(duration)
 	var durationIntExec int
 	if duration == "" {
@@ -325,8 +329,8 @@ func run(parFile string) {
 	duration = strconv.Itoa(durationIntExec)
 	durationString := strconv.Itoa(durationInt1) + "s"
 	sleepTime, err := time.ParseDuration(durationString)
-	podListp := getPodStatus(client, datap)
-	podList := *podListp
+	targetPods := getPodStatus(client, targetPodsp)
+	podList := *targetPods
 	count := len(podList)
 
 	var workerGroup sync.WaitGroup
