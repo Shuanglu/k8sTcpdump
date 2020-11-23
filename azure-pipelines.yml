@@ -31,3 +31,12 @@ steps:
 - task: PublishBuildArtifacts@1
   inputs:
      artifactName: k8stcpdump
+- task: GithubRelease@0 
+  displayName: 'Create GitHub Release'      
+  inputs:
+    gitHubConnection: Shuanglu
+    repositoryName: Shuanglu/k8sTcpdump
+    tagSource: manual
+    tag: $(Build.BuildNumber)      
+    assets: |
+      $(Build.ArtifactStagingDirectory)/k8stcpdump
