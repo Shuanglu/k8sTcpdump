@@ -20,7 +20,8 @@ steps:
     arguments: '-o "$(System.DefaultWorkingDirectory)/k8stcpdump" -ldflags="-s -w"'
 - task: CopyFiles@2
   inputs:
-    TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    Contents: $(System.DefaultWorkingDirectory)/k8stcpdump
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/k8stcpdump'
 - task: PublishBuildArtifacts@1
   inputs:
      artifactName: drop
