@@ -15,9 +15,7 @@ steps:
     workingDirectory: '$(System.DefaultWorkingDirectory)'
 - task: CmdLine@2
   inputs:
-    env: 
-      upx: 'https://github.com/upx/upx/releases/download/v3.96/upx-3.96-amd64_linux.tar.xz'
-    script: 'wget %UPX% && tar -xvf ./upx-3.96-amd64_linux.tar.xz'
+    script: 'wget https://github.com/upx/upx/releases/download/v3.96/upx-3.96-amd64_linux.tar.xz && tar -xvf ./upx-3.96-amd64_linux.tar.xz'
 - task: Go@0
   inputs:
     command: 'build'
