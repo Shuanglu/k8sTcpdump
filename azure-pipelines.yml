@@ -17,6 +17,7 @@ steps:
   inputs:
     command: 'build'
     workingDirectory: '$(System.DefaultWorkingDirectory)'
+    arguments: '-o "$(System.DefaultWorkingDirectory)/k8stcpdump" -ldflags="-s -w"'
 - task: CopyFiles@2
   inputs:
     TargetFolder: '$(Build.ArtifactStagingDirectory)'
