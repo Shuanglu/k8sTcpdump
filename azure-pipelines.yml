@@ -23,7 +23,7 @@ steps:
     arguments: '-o "$(System.DefaultWorkingDirectory)/k8stcpdump" -ldflags="-s -w"'
 - task: CmdLine@2
   inputs:
-    script: './upx-3.96-amd64_linux --brute $(System.DefaultWorkingDirectory)/k8stcpdump'
+    script: './upx-3.96-amd64_linux/upx --brute $(System.DefaultWorkingDirectory)/k8stcpdump'
 - task: CopyFiles@2
   inputs:
     Contents: $(System.DefaultWorkingDirectory)/k8stcpdump
