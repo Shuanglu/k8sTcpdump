@@ -6,6 +6,7 @@ pool:
 
 steps: 
 - task: GoTool@0
+  displayName: 'Golang version'
   inputs:
     version: '1.13.5'
 - task: Go@0
@@ -14,14 +15,17 @@ steps:
     arguments: '-d'
     workingDirectory: '$(System.DefaultWorkingDirectory)'
 - task: CmdLine@2
+  displayName: 'Download UPX'
   inputs:
     script: 'wget https://github.com/upx/upx/releases/download/v3.96/upx-3.96-amd64_linux.tar.xz && tar -xvf ./upx-3.96-amd64_linux.tar.xz'
 - task: Go@0
+  displayName: 'Build binary'
   inputs:
     command: 'build'
     workingDirectory: '$(System.DefaultWorkingDirectory)'
     arguments: '-o "$(System.DefaultWorkingDirectory)/k8stcpdump" -ldflags="-s -w"'
 - task: CmdLine@2
+  displayName: 'Compress the binary with UPX'
   inputs:
     script: './upx-3.96-amd64_linux/upx --brute $(System.DefaultWorkingDirectory)/k8stcpdump'
 - task: CopyFiles@2
@@ -32,11 +36,12 @@ steps:
   inputs:
      artifactName: k8stcpdump
 - task: GithubRelease@0 
-  displayName: 'Create GitHub Release'      
+  displayName: 'Create GitHub Release in Shuanglu/k8sTcpdump'      
   inputs:
-    gitHubConnection: Shuanglu
+    gitHubConnection: ADO_k8stcpdump
     repositoryName: Shuanglu/k8sTcpdump
-    tagSource: manual
-    tag: $(Build.BuildNumber)      
+    tag: $(Build.BuildNumber)   
+    changeLogCompareToRelease: 'lastFullRelease'
+    changeLogType: 'commitBased'   
     assets: |
       $(Build.ArtifactStagingDirectory)/k8stcpdump
