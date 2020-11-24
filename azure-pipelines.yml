@@ -41,7 +41,7 @@ steps:
     gitHubConnection: ADO_k8stcpdump
     repositoryName: Shuanglu/k8sTcpdump
     tag: $(Build.BuildNumber)   
-    changeLogCompareToRelease: 'lastFullRelease'
-    changeLogType: 'commitBased'   
+    Pre-release: true 
+    tagSource: manual
     assets: |
       $(Build.ArtifactStagingDirectory)/k8stcpdump
