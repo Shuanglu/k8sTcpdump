@@ -41,5 +41,5 @@ steps:
     repositoryName: 'Shuanglu/k8sTcpdump'
     action: 'create'
     target: '$(Build.SourceVersion)'
-    tagSource: 'Gittag'
+    tagSource: 'gitTag'
     isPreRelease: true
