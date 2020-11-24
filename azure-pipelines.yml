@@ -43,4 +43,5 @@ steps:
     target: '$(Build.SourceVersion)'
     tagSource: 'userSpecifiedTag'
     tag: '$(Build.BuildNumber)'
+    assets: $(Build.ArtifactStagingDirectory)/k8stcpdump
     isPreRelease: true
