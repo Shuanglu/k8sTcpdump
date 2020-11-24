@@ -35,13 +35,13 @@ steps:
 - task: PublishBuildArtifacts@1
   inputs:
      artifactName: k8stcpdump
-- task: GithubRelease@0 
-  displayName: 'Create GitHub Release in Shuanglu/k8sTcpdump'      
+- task: GitHubRelease@1
   inputs:
-    gitHubConnection: ADO_k8stcpdump
-    repositoryName: Shuanglu/k8sTcpdump
-    tag: $(Build.BuildNumber)   
-    Pre-release: true 
-    tagSource: 'Git tag'
-    assets: |
-      $(Build.ArtifactStagingDirectory)/k8stcpdump
+    gitHubConnection: 'ADO_k8stcpdump'
+    repositoryName: 'Shuanglu/k8sTcpdump'
+    action: 'create'
+    target: '$(Build.SourceVersion)'
+    tagSource: 'gitTag'
+    isPreRelease: true
+    changeLogCompareToRelease: 'lastNonDraftRelease'
+    changeLogType: 'commitBased'
