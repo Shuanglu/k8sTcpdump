@@ -42,6 +42,6 @@ steps:
     repositoryName: Shuanglu/k8sTcpdump
     tag: $(Build.BuildNumber)   
     Pre-release: true 
-    tagSource: manual
+    tagSource: 'Git tag'
     assets: |
       $(Build.ArtifactStagingDirectory)/k8stcpdump
