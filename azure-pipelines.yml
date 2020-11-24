@@ -41,7 +41,8 @@ steps:
     repositoryName: 'Shuanglu/k8sTcpdump'
     action: 'create'
     target: '$(Build.SourceVersion)'
-    tagSource: 'gitTag'
+    tagSource: 'User specified tag'
+    Tag: 'v0.2'
     isPreRelease: true
     changeLogCompareToRelease: 'lastNonDraftRelease'
     changeLogType: 'commitBased'
