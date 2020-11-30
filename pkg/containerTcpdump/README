@@ -1,0 +1,4 @@
+### Usage:
+1. Replace the pod name,namespace and UID in the 'containertcpdump.yaml'
+2. Add the nodeselector in the 'containertcpdump.yaml'
+3. Deploy it to k8s 

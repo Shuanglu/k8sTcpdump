@@ -1,0 +1,64 @@
+apiVersion: v1
+data:
+  containers.json: |
+    {
+        "Containers": [
+            {
+                "Name": "k8s_POD_kube-proxy-trsrt_kube-system_026711f5-daa6-410d-823c-26c03b5c3c60"
+            },
+            {
+                "Name": "k8s_POD_coredns-79766dfd68-cf4tp_kube-system_47412086-f64e-4b16-bbd0-1180782d568c"
+            }
+        ],
+        "Duration": "15"
+    }
+kind: ConfigMap
+metadata:
+  name: containers
+  namespace: default
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: containertcpdump
+  namespace: default
+spec:
+  containers:
+  - image: shawnlu/containertcpdump:20201130
+    imagePullPolicy: Always
+    name: containertcpdump
+    resources: {}
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: containers
+      mountPath: /mnt/containerTcpdump/containers.json
+      subPath: containers.json
+    readinessProbe:
+      exec:
+        command:
+        - ls 
+        - /tmp/containerTcpdumpComplete  
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  priority: 0
+  restartPolicy: Always
+  schedulerName: default-scheduler
+  hostPID: true
+  terminationGracePeriodSeconds: 30
+  volumes:
+  - name: containers
+    configMap: 
+      name: containers
+  tolerations:
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
