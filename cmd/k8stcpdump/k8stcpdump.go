@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 
 	log "github.com/sirupsen/logrus"
 
 	//"9fans.net/go/plan9/client"
 
 	apicore "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -30,158 +31,160 @@ import (
 	"encoding/hex"
 	"io"
 	"io/ioutil"
-	"strconv"
 	"sync"
 	"time"
 	//"k8sTcpdump/k8stcpdump"
 )
 
 var cfgFile string
-var parFile string
 
-type target struct {
+//var parFile string
+
+type targetPod struct {
 	Name      string `json:"Name"`
 	Namespace string `json:"Namespace"`
-	Node      string `json:"Node"`
-	Uid       string `json:"Uid"`
+	Node      string `json:"Node",omitempty`
+	Uid       string `json:"Uid", omitempty`
 }
 
 type targets struct {
-	Pods     []target `json:"Pods"`
-	Duration string   `json:"Duration"`
+	Pods            []targetPod       `json:"Pods"`
+	Runtime         string            `json:"Runtime,omitempty"`
+	RuntimeEndpoint map[string]string `json:"RuntimeEndpoint,omitempty"`
+	Duration        int               `json:"Duration"`
 	//Deployments  []target `json:"Deployments"`
 	//Daemonsets   []target `json:"Daemonsets"`
 	//Replicasets  []target `json:"Replicasets"`
 	//Statefulsets []target `json:"Statefulsets"`
 }
 
-type targetPods struct {
-	Pods []target `json:"Pods"`
-}
+func filterPods(client *kubernetes.Clientset, targetpods []targetPod) ([]targetPod, []targetPod, map[string][]string) {
+	var dockerFilteredTargetPods, containerdFilteredTargetPods []targetPod
+	nodeMap := make(map[string][]string)
+	for _, targetpod := range targetpods {
+		pod, err := client.CoreV1().Pods(targetpod.Namespace).Get(context.TODO(), targetpod.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Warning(fmt.Sprintf("Failed to get the pod %s in the namespace %s", targetpod.Name, targetpod.Namespace))
+			continue
+		}
+		if pod.Status.Phase == "Pending" || pod.Status.Phase == "Unknown" || pod.Status.Phase == "Failed" {
+			log.Warning("Pod %s in the namespace %s is not in running/crashloopbackoff status. Will skip this pod", pod.Name, pod.Namespace)
+		}
+		nodeInfo, err := client.CoreV1().Nodes().Get(context.TODO(), pod.Spec.NodeName, metav1.GetOptions{})
+		if err != nil {
+			log.Warning(fmt.Sprintf("Failed to get the node info of the pod %s in the namespace %s: %s. Will skip this pod", targetpod.Name, targetpod.Namespace, err))
+			continue
+		}
+		filteredTargetPod := targetPod{
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+			Uid:       string(pod.UID),
+			Node:      nodeInfo.Name,
+		}
 
-func dropErr(e error) {
-	if e != nil {
-		panic(e)
-	}
-}
-
-func getPodStatus(client *kubernetes.Clientset, data *targets) *[]target {
-	var targetPods []target
-	for i := 0; i < len(data.Pods); i++ {
-		pod, err := client.CoreV1().Pods(data.Pods[i].Namespace).Get(context.TODO(), data.Pods[i].Name, metav1.GetOptions{})
-		podName := pod.ObjectMeta.Name
-		podStatus := pod.Status.Phase
-		podNode := pod.Spec.NodeName
-		podUid := string(pod.ObjectMeta.UID)
-		if errors.IsNotFound(err) {
-			log.Info(fmt.Sprintf("Pod '%s' in namespace '%s' not found. Will skip this pod", data.Pods[i].Name, data.Pods[i].Namespace))
-		} else if statusError, isStatus := err.(*errors.StatusError); isStatus {
-			log.Warn(fmt.Sprintf("Error getting pod '%s' in namespace '%s': %v. Will skip this pod.",
-				data.Pods[i].Name, data.Pods[i].Namespace, statusError.ErrStatus.Message))
-		} else if err != nil {
-			log.Fatal("All target pods are not able to be found", err)
-		} else {
-			if podStatus != "Pending" && podStatus != "Unkonwn" && podStatus != "Failed" {
-				log.Info(fmt.Sprintf("Pod '%s' in the namespace '%s' has been scheduled on the %s and not in 'Failed/Unknown' status", podName, data.Pods[i].Namespace, podNode))
-				if data.Pods[i].Node != podNode {
-					log.Info(fmt.Sprintf("Node of Pod '%s' in the namespace '%s' is different/missing from the input. Use the latest one %s", podName, data.Pods[i].Namespace, podNode))
-				}
-				var targetPod target
-				targetPod.Name = podName
-				targetPod.Node = podNode
-				targetPod.Namespace = pod.Namespace
-				targetPod.Uid = podUid
-				targetPods = append(targetPods, targetPod)
-			}
+		containerRumtime := nodeInfo.Status.NodeInfo.ContainerRuntimeVersion
+		docker, err := regexp.Match("docker", []byte(containerRumtime))
+		if err != nil {
+			log.Warning(fmt.Sprintf("Failed to get the container runtime version of the node %s: %s. Will skip this pod", nodeInfo.Name, err))
+			continue
+		}
+		if docker {
+			dockerFilteredTargetPods = append(dockerFilteredTargetPods, filteredTargetPod)
+			nodeMap["docker"] = append(nodeMap["docker"], nodeInfo.Name)
+		}
+		containerd, _ := regexp.Match("containerd", []byte(containerRumtime))
+		if containerd {
+			containerdFilteredTargetPods = append(containerdFilteredTargetPods, filteredTargetPod)
+			nodeMap["containerd"] = append(nodeMap["containerd"], nodeInfo.Name)
 		}
 	}
-	return &targetPods
+	return dockerFilteredTargetPods, containerdFilteredTargetPods, nodeMap
 }
 
-func parse(p string) (*rest.Config, *kubernetes.Clientset, *targets) {
+func parse(p string) (*rest.Config, *kubernetes.Clientset, targets, error) {
 	if cfgFile == "" {
 		home, _ := homedir.Dir()
 		cfgFile = filepath.Join(home, ".kube", "config")
-		log.Info(fmt.Sprintf("Load the kubeconfig under path '%s'", cfgFile))
+		log.Info(fmt.Sprintf("Will use the kubeconfig under path %s", cfgFile))
 	}
 	restConfig, err := clientcmd.BuildConfigFromFlags("", cfgFile)
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Failed to build k8s REST client using the kubeconfig file under '%s'", cfgFile))
+		err = fmt.Errorf("Failed to build k8s REST client using the kubeconfig file under %s", cfgFile)
+		return nil, nil, targets{}, err
 	}
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Failed to build k8s clientset using the kubeconfig file under path '%s'", cfgFile))
+		err = fmt.Errorf("Failed to build k8s clientset using the kubeconfig file under path %s", cfgFile)
+		return nil, nil, targets{}, err
 	}
 
 	file, err := ioutil.ReadFile(p)
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Failed to load the paramter file under path '%s'", p))
+		err = fmt.Errorf("Failed to load the paramter file under path %s: %s", p, err)
+		return nil, nil, targets{}, err
 	}
 
 	data := targets{}
 	err = json.Unmarshal([]byte(file), &data)
 	if err != nil {
-		log.Fatal("Failed to load the JSON data from the parameter file")
+		err = fmt.Errorf("Failed to load the JSON data from the parameter file %s: ", p, err)
+		return nil, nil, targets{}, err
 	}
-	return restConfig, client, &data
+	return restConfig, client, data, nil
 }
 
-func getPodDef(pod *target, duration string) *apicore.Pod {
-	n := 2
-	temp := make([]byte, n)
-	rand.Read(temp)
-	suffix := hex.EncodeToString(temp)
-	var privileged bool
-	privileged = true
-	var command string
-	var probeCommand []string
-	command = "rm -rf /tmp/" + pod.Name + "_" + pod.Namespace + ".cap; rm -rf /tmp/complete-" + pod.Name + "_" + pod.Namespace + "; nsenter -t $(docker inspect $(docker ps |grep '" + pod.Uid + "'|grep -v pause|awk '{print $1}')| grep '\"Pid\":' | grep -Eo '[0-9]*') -n timeout " + duration + " tcpdump -i any -w /tmp/" + pod.Name + "_" + pod.Namespace + ".cap; sleep 2;touch /tmp/complete-" + pod.Name + "_" + pod.Namespace + "; tail -f /dev/null"
-	//log.Info(command)
-	probeCommand = []string{"ls", "/tmp/complete-" + pod.Name + "_" + pod.Namespace}
-	//log.Info(probeCommand)
-	return &apicore.Pod{
+func generatePodManifest(runtimeEndpoint string, configMapName string, labelValue string, podSuffix string, node string) apicore.Pod {
+	return apicore.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      pod.Name + "-" + suffix,
-			Namespace: pod.Namespace,
-			Labels: map[string]string{
-				"tdn":  pod.Name,
-				"tdns": pod.Namespace,
-			},
+			Name:      "tcpdumpagent" + "-" + podSuffix,
+			Namespace: "default",
+			Labels:    map[string]string{"run": labelValue},
 		},
 		Spec: apicore.PodSpec{
+			Volumes: []apicore.Volume{
+				{
+					Name: "targetpodsjson",
+					VolumeSource: apicore.VolumeSource{
+						ConfigMap: &apicore.ConfigMapVolumeSource{
+							LocalObjectReference: apicore.LocalObjectReference{
+								Name: configMapName,
+							},
+						},
+					},
+				},
+				{
+					Name: "containerruntime",
+					VolumeSource: apicore.VolumeSource{
+						HostPath: &apicore.HostPathVolumeSource{
+							Path: runtimeEndpoint,
+						},
+					},
+				},
+			},
 			Containers: []apicore.Container{
 				{
-					Name:            pod.Name,
-					Image:           "docker.io/library/alpine",
-					ImagePullPolicy: apicore.PullIfNotPresent,
-					Command: []string{
-						"nsenter",
-						"-t",
-						"1",
-						"-m",
-						"-u",
-						"-i",
-						"-n",
-						"-p",
-						"--",
-						"bash",
-						"-c",
-						command,
-					},
-					SecurityContext: &apicore.SecurityContext{
-						Privileged: &privileged,
+					Name:  "tcpdumpagent",
+					Image: "shawnlu/tcpdumpagent:20210428",
+					VolumeMounts: []apicore.VolumeMount{
+						{
+							Name:      "containerruntime",
+							MountPath: runtimeEndpoint,
+						},
+						{
+							Name:      "targetpodsjson",
+							MountPath: "/mnt/",
+						},
 					},
 					ReadinessProbe: &apicore.Probe{
 						Handler: apicore.Handler{
 							Exec: &apicore.ExecAction{
-								Command: probeCommand,
+								Command: []string{"ls", "/tmp/tcpdumpAgentComplete"},
 							},
 						},
 					},
 				},
 			},
-			NodeName: pod.Node,
-			HostPID:  true,
+			NodeSelector: map[string]string{"kubernetes.io/hostname": node},
 		},
 	}
 }
@@ -206,13 +209,13 @@ func watchPodStatus(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) wait.
 	}
 }
 
-func createPod(client *kubernetes.Clientset, targetPod *target, duration string) (*apicore.Pod, error) {
-	podDefinition := getPodDef(targetPod, duration)
-	tcpdumpPod, err := client.CoreV1().Pods(podDefinition.ObjectMeta.Namespace).Create(context.TODO(), podDefinition, metav1.CreateOptions{})
+func createPod(client *kubernetes.Clientset, podManifest *apicore.Pod) (*apicore.Pod, error) {
+	//podDefinition := getPodDef(targetPod, duration)
+	tcpdumpPod, err := client.CoreV1().Pods(podManifest.ObjectMeta.Namespace).Create(context.TODO(), podManifest, metav1.CreateOptions{})
 	if err == nil {
 		log.Info(fmt.Sprintf("Pod '%s' in the namespace '%s' has been created.", tcpdumpPod.Name, tcpdumpPod.Namespace))
 	} else {
-		log.Warn(fmt.Sprintf("Pod '%s' in the namespace '%s' failed to be created due to '%s'.", podDefinition.ObjectMeta.Name, podDefinition.ObjectMeta.Namespace, err.Error()))
+		log.Warn(fmt.Sprintf("Pod '%s' in the namespace '%s' failed to be created due to '%s'.", podManifest.ObjectMeta.Name, podManifest.ObjectMeta.Namespace, err.Error()))
 	}
 	return tcpdumpPod, err
 }
@@ -281,49 +284,29 @@ func cleanUp(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) error {
 	return err
 }
 
-//func watchPodStatus(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) bool {
-//	listOption := "metadata.name=" + tcpdumpPod.ObjectMeta.Name
-//	podWatcher, err := client.CoreV1().Pods(tcpdumpPod.ObjectMeta.Namespace).Watch(context.TODO(), metav1.ListOptions{
-//		FieldSelector: listOption})
-//	if err != nil {
-//		log.Warn(fmt.Sprintf("Failed to get the status of the pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
-//	}
-//var podWatcherRes struct
-//	podWatcherEvent := <-podWatcher.ResultChan()
-//	log.Info(podWatcherEvent.Type)
-//	if podWatcherEvent.Type == "MODIFIED" {
-//		return true
-//	}
-//	return false
-//}
-
-func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, targetPod *target, duration string, sleepTime time.Duration) error {
+func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, podManifest apicore.Pod, duration int, podOperationErr map[string]error) {
 	defer workerGroup.Done()
-	tcpdumpPod, err := createPod(client, targetPod, duration)
+	var tcpdumpPod *apicore.Pod
+	var err error
+	for i := 0; i < 5; i++ {
+		tcpdumpPod, err = createPod(client, &podManifest)
+		if err == nil || i == 4 {
+			break
+		}
+		time.Sleep(time.Duration(10))
+	}
+	//tcpdumpPod, err := retry(5,time.Duration(10), createPod, parameters)
+	if err != nil {
+		//retry once more if any error
+		//tcpdumpPod, err = createPod(client, &podManifest)
+		podOperationErr[podManifest.Spec.NodeSelector["kubernetes.io/hostname"]] = err
+	}
 	if err == nil {
-
-		err = wait.PollImmediate(time.Second*1, sleepTime, watchPodStatus(client, tcpdumpPod))
-		//for {
-		//if modified := watchPodStatus(client, tcpdumpPod); modified == true {
-		//	tcpdumpPod, err := client.CoreV1().Pods(tcpdumpPod.ObjectMeta.Namespace).Get(context.TODO(), tcpdumpPod.ObjectMeta.Name, metav1.GetOptions{})
-		//	if err != nil {
-		//		log.Warn(fmt.Sprintf("Failed to get the pod '%s' in the namespace '%s'. Will EXIT.", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
-		//		log.Fatal(err)
-		//return false, err
-		//	}
-		//	if tcpdumpPod.Status.Phase == "Running" {
-		//		if tcpdumpPod.Status.Conditions[1].Type == apicore.PodReady {
-		//			if tcpdumpPod.Status.Conditions[1].Status == apicore.ConditionTrue {
-		//				log.Info(fmt.Sprintf("Tcpdump process in the Pod '%s' in the namesapce '%s' has completed now", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
-		//				break
-		//			}
-		//		}
-		//	}
-		//}
-		//}
-
+		durationStr := strconv.Itoa(duration+300) + "s"
+		durationWait, _ := time.ParseDuration(durationStr)
+		err = wait.PollImmediate(time.Second*1, time.Duration(durationWait), watchPodStatus(client, tcpdumpPod))
 		if err != nil {
-			log.Warn(fmt.Sprintf("Timeout while waiting tcpdump for pod '%s' in the namespace '%s' to complete", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+			log.Warn(fmt.Sprintf("Timeout while waiting tcpdump for pod '%s' in the namespace '%s' to complete: %s", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace, err))
 			//log.Fatal(err)
 		} else {
 			err = downloadFromPod(restConfig, client, tcpdumpPod)
@@ -336,35 +319,145 @@ func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *
 			log.Warn(fmt.Sprintf("Failed to clean up the pod '%s'", tcpdumpPod.ObjectMeta.Name))
 		}
 	}
-
-	return nil
+	//return nil
 }
 
 // Run is responsible for starting the command
 func Run(parFile string) {
-	restConfig, client, targetPodsp := parse(parFile)
-	duration := *&targetPodsp.Duration
-	durationInt1, err := strconv.Atoi(duration)
-	var durationIntExec int
-	if duration == "" {
-		log.Fatal("Duration cannot be empty")
-	}
+	//Parse the parameter file which contains the pods to be captured.
+	restConfig, client, inputTargets, err := parse(parFile)
+	duration := inputTargets.Duration
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Duration '%s' failed to be translated to 'int' format", duration))
+		log.Fatal(fmt.Sprintf("Failed to parse the parameter file under %s: %s", parFile, err))
 	}
-	durationIntExec = durationInt1 + 2
-	durationInt1 = durationInt1 + 50
-	duration = strconv.Itoa(durationIntExec)
-	durationString := strconv.Itoa(durationInt1) + "s"
-	sleepTime, err := time.ParseDuration(durationString)
-	targetPods := getPodStatus(client, targetPodsp)
-	podList := *targetPods
-	count := len(podList)
-
+	if duration <= 0 {
+		log.Fatal("Duration has to be >= 0")
+	}
+	var dockerFilteredTargetPods, containerdFilteredTargetPods []targetPod
+	var nodeMap map[string][]string
+	//Create maping of pods/nodes
+	dockerFilteredTargetPods, containerdFilteredTargetPods, nodeMap = filterPods(client, inputTargets.Pods)
+	if len(dockerFilteredTargetPods) == 0 && len(containerdFilteredTargetPods) == 0 {
+		log.Fatal(fmt.Sprintf("No pods are available to capture the network trace. Please check previous log. Exiting....."))
+	}
+	var containerdEndpoint, dockerEndpoint string
+	if inputTargets.RuntimeEndpoint["docker"] != "" {
+		dockerEndpoint = inputTargets.RuntimeEndpoint["docker"]
+	} else if inputTargets.RuntimeEndpoint["containerd"] != "" {
+		containerdEndpoint = inputTargets.RuntimeEndpoint["containerd"]
+	} else {
+		containerdEndpoint = "/run/containerd/containerd.sock"
+		dockerEndpoint = "/var/run/dockershim.sock"
+	}
+	temp := make([]byte, 2)
+	rand.Read(temp)
+	suffix := hex.EncodeToString(temp)
+	var containerdConfigMapName, dockerConfigMapName string
+	var containerdErr, dockerErr error
+	labelValue := "k8stcpdump" + suffix
 	var workerGroup sync.WaitGroup
-	for i := 0; i < count; i++ {
+	if len(containerdFilteredTargetPods) > 0 {
+		containerdConfigMapName = "containerdconfigmap-" + suffix
+
+		containerdConfigMapData := targets{
+			Pods:            containerdFilteredTargetPods,
+			Runtime:         "containerd",
+			RuntimeEndpoint: inputTargets.RuntimeEndpoint,
+			Duration:        inputTargets.Duration,
+		}
+
+		containerConfigMapDataByte, err := json.Marshal(containerdConfigMapData)
+		if err == nil {
+			containerdConfigMap := &apicore.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      containerdConfigMapName,
+					Namespace: "default",
+					Labels:    map[string]string{"run": labelValue},
+				},
+				Data: map[string]string{"pods.json": string(containerConfigMapDataByte)},
+			}
+			for i := 0; i < 5; i++ {
+				_, err := client.CoreV1().ConfigMaps("default").Create(context.TODO(), containerdConfigMap, metav1.CreateOptions{})
+				if err == nil || i == 4 {
+					break
+				}
+				time.Sleep(time.Duration(10))
+			}
+			if err != nil {
+				//containerdErr = fmt.Errorf("Failed to create configmap %s: %s", containerdConfigMapName, err)
+				log.Fatal(fmt.Sprintf("Failed to create configmap %s: %s", containerdConfigMapName, err))
+			}
+		} else {
+			//containerdErr = fmt.Errorf("Failed to create configmap %s: %s", containerdConfigMapName, err)
+			log.Fatal(fmt.Sprintf("Failed to create configmap %s: %s", containerdConfigMapName, err))
+		}
+	}
+	if len(dockerFilteredTargetPods) > 0 {
+		dockerConfigMapName = "dockerconfigmap-" + suffix
+
+		dockerdConfigMapData := targets{
+			Pods:            dockerFilteredTargetPods,
+			Runtime:         "docker",
+			RuntimeEndpoint: inputTargets.RuntimeEndpoint,
+			Duration:        inputTargets.Duration,
+		}
+		dockerdConfigMapDataByte, err := json.Marshal(dockerdConfigMapData)
+		if err == nil {
+			dockerConfigMap := &apicore.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dockerConfigMapName,
+					Namespace: "default",
+					Labels:    map[string]string{"run": labelValue},
+				},
+				Data: map[string]string{"pods.json": string(dockerdConfigMapDataByte)},
+			}
+			for i := 0; i < 5; i++ {
+				_, err := client.CoreV1().ConfigMaps("default").Create(context.TODO(), dockerConfigMap, metav1.CreateOptions{})
+				if err == nil || i == 4 {
+					break
+				}
+				time.Sleep(time.Duration(10))
+			}
+			if err != nil {
+				//dockerErr = fmt.Errorf("Failed to create configmap %s: %s", dockerConfigMapName, err)
+				log.Fatal(fmt.Sprintf("Failed to create configmap %s: %s", dockerConfigMapName, err))
+			}
+		} else {
+			//dockerErr = fmt.Errorf("Failed to create configmap %s: %s", dockerConfigMapName, err)
+			log.Fatal(fmt.Sprintf("Failed to create configmap %s: %s", dockerConfigMapName, err))
+		}
+	}
+	podOperationErr := make(map[string]error)
+	podManifest := apicore.Pod{}
+	podManifests := []apicore.Pod{}
+	existingNodes := make(map[string]int)
+	if len(containerdFilteredTargetPods) > 0 && containerdErr == nil {
+		for _, node := range nodeMap["containerd"] {
+			if existingNodes[node] == 0 {
+				existingNodes[node] = 1
+				temp := make([]byte, 2)
+				rand.Read(temp)
+				podSuffix := hex.EncodeToString(temp)
+				podManifest = generatePodManifest(containerdEndpoint, containerdConfigMapName, labelValue, podSuffix, node)
+				podManifests = append(podManifests, podManifest)
+			}
+		}
+	}
+	if len(dockerFilteredTargetPods) > 0 && dockerErr == nil {
+		for _, node := range nodeMap["docker"] {
+			if existingNodes[node] == 0 {
+				existingNodes[node] = 1
+				temp := make([]byte, 2)
+				rand.Read(temp)
+				podSuffix := hex.EncodeToString(temp)
+				podManifest = generatePodManifest(dockerEndpoint, dockerConfigMapName, labelValue, podSuffix, node)
+				podManifests = append(podManifests, podManifest)
+			}
+		}
+	}
+	for _, pod := range podManifests {
 		workerGroup.Add(1)
-		go podOperation(&workerGroup, restConfig, client, &podList[i], duration, sleepTime)
+		go podOperation(&workerGroup, restConfig, client, pod, duration, podOperationErr)
 	}
 	//fmt.Println("Wait for workers")
 	workerGroup.Wait()

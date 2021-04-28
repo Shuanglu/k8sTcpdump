@@ -1,14 +1,14 @@
 {
     "Pods": [
         {
-            "Name": "test",
-            "Namespace": "default"
+            "Name": "tunnelfront-6d5cd84fc6-p7gdb",
+            "Namespace": "kube-system"
         },
         {
-            "Name": "coredns-869cb84759-6xqhv",
+            "Name": "coredns-748cdb7bf4-jdxfm",
             "Namespace": "kube-system"
         }
     ],
-    "Duration": "15"
+    "Duration": 15
 }        
 
