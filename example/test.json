@@ -5,8 +5,22 @@
             "Namespace": "kube-system"
         },
         {
+            "Name": "metrics-server-58fdc875d5-cnvml",
+            "Namespace": "kube-system"
+        },
+        {
             "Name": "coredns-748cdb7bf4-jdxfm",
             "Namespace": "kube-system"
+        }
+    ],
+    "Runtimes": [
+        {
+            "Name": "docker",
+            "RuntimeEndpoint": "/var/run/docker.sock"
+        },
+        {
+            "Name": "containerd",
+            "RuntimeEndpoint": "/run/containerd/containerd.sock"
         }
     ],
     "Duration": 15
