@@ -15,6 +15,7 @@ import (
 	//"9fans.net/go/plan9/client"
 
 	apicore "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -47,11 +48,23 @@ type targetPod struct {
 	Uid       string `json:"Uid", omitempty`
 }
 
+type targetPods struct {
+	Pods            []targetPod `json:"Pods"`
+	Runtime         string      `json:"Runtime"`
+	RuntimeEndpoint string      `json:"RuntimeEndpoint"`
+	Duration        int         `json:"Duration"`
+}
+
+type runtime struct {
+	Name            string `json:"Name"`
+	RuntimeEndpoint string `json:"RuntimeEndpoint"`
+}
+
 type targets struct {
-	Pods            []targetPod       `json:"Pods"`
-	Runtime         string            `json:"Runtime,omitempty"`
-	RuntimeEndpoint map[string]string `json:"RuntimeEndpoint,omitempty"`
-	Duration        int               `json:"Duration"`
+	Pods     []targetPod `json:"Pods"`
+	Runtimes []runtime   `json:"Runtimes,omitempty"`
+	//RuntimeEndpoint map[string]string `json:"RuntimeEndpoint,omitempty"`
+	Duration int `json:"Duration"`
 	//Deployments  []target `json:"Deployments"`
 	//Daemonsets   []target `json:"Daemonsets"`
 	//Replicasets  []target `json:"Replicasets"`
@@ -134,6 +147,8 @@ func parse(p string) (*rest.Config, *kubernetes.Clientset, targets, error) {
 }
 
 func generatePodManifest(runtimeEndpoint string, configMapName string, labelValue string, podSuffix string, node string) apicore.Pod {
+	boolValue := true
+	hostpathType := v1.HostPathSocket
 	return apicore.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "tcpdumpagent" + "-" + podSuffix,
@@ -153,10 +168,19 @@ func generatePodManifest(runtimeEndpoint string, configMapName string, labelValu
 					},
 				},
 				{
-					Name: "containerruntime",
+					Name: "var",
+					VolumeSource: apicore.VolumeSource{
+						HostPath: &apicore.HostPathVolumeSource{
+							Path: "/var/run/",
+						},
+					},
+				},
+				{
+					Name: "runtimeendpoint",
 					VolumeSource: apicore.VolumeSource{
 						HostPath: &apicore.HostPathVolumeSource{
 							Path: runtimeEndpoint,
+							Type: &hostpathType,
 						},
 					},
 				},
@@ -164,15 +188,19 @@ func generatePodManifest(runtimeEndpoint string, configMapName string, labelValu
 			Containers: []apicore.Container{
 				{
 					Name:  "tcpdumpagent",
-					Image: "shawnlu/tcpdumpagent:20210428",
+					Image: "shawnlu/tcpdumpagent:20210429",
 					VolumeMounts: []apicore.VolumeMount{
 						{
-							Name:      "containerruntime",
-							MountPath: runtimeEndpoint,
+							Name:      "var",
+							MountPath: "/var/run/",
 						},
 						{
 							Name:      "targetpodsjson",
 							MountPath: "/mnt/",
+						},
+						{
+							Name:      "runtimeendpoint",
+							MountPath: runtimeEndpoint,
 						},
 					},
 					ReadinessProbe: &apicore.Probe{
@@ -181,6 +209,9 @@ func generatePodManifest(runtimeEndpoint string, configMapName string, labelValu
 								Command: []string{"ls", "/tmp/tcpdumpAgentComplete"},
 							},
 						},
+					},
+					SecurityContext: &apicore.SecurityContext{
+						Privileged: &boolValue,
 					},
 				},
 			},
@@ -220,60 +251,64 @@ func createPod(client *kubernetes.Clientset, podManifest *apicore.Pod) (*apicore
 	return tcpdumpPod, err
 }
 
-func downloadFromPod(restConfig *rest.Config, client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) error {
-	path := "/tmp/" + tcpdumpPod.Spec.Containers[0].Name + "_" + tcpdumpPod.ObjectMeta.Namespace + ".cap"
-	command := []string{"tar", "cf", "-", path}
-	req := client.CoreV1().RESTClient().Post().Namespace(tcpdumpPod.ObjectMeta.Namespace).Resource("pods").Name(tcpdumpPod.ObjectMeta.Name).SubResource("exec").VersionedParams(&apicore.PodExecOptions{
-		Container: tcpdumpPod.Spec.Containers[0].Name,
-		Command:   command,
-		Stdin:     true,
-		Stdout:    true,
-		Stderr:    true,
-		TTY:       false,
-	}, scheme.ParameterCodec)
-	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
-	if err != nil {
-		log.Warn(fmt.Sprintf("Failed to build stream connection with the Pod '%s'.", tcpdumpPod.ObjectMeta.Name))
-		log.Fatal(err)
-	}
-	reader, outStream := io.Pipe()
+func downloadFromPod(restConfig *rest.Config, client *kubernetes.Clientset, tcpdumpPod *apicore.Pod, pods []string) error {
+	//path := "/tmp/" + tcpdumpPod.ObjectMeta.Namespace + "-" + tcpdumpPod.ObjectMeta.Name + ".cap"
 
-	go func() {
-		defer outStream.Close()
-		err = exec.Stream(remotecommand.StreamOptions{
-			Stdin:  os.Stdin,
-			Stdout: outStream,
-			Stderr: os.Stderr,
-			Tty:    false,
-		})
-	}()
-	tarReader := tar.NewReader(reader)
-	for {
-		_, err := tarReader.Next()
+	for _, file := range pods {
+		command := []string{"tar", "cf", "-", "/tmp/tcpdumpagent/" + file + ".cap"}
+		req := client.CoreV1().RESTClient().Post().Namespace(tcpdumpPod.ObjectMeta.Namespace).Resource("pods").Name(tcpdumpPod.ObjectMeta.Name).SubResource("exec").VersionedParams(&apicore.PodExecOptions{
+			Container: tcpdumpPod.Spec.Containers[0].Name,
+			Command:   command,
+			Stdin:     true,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+		exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
 		if err != nil {
-			if err != io.EOF {
-				log.Warn(fmt.Sprintf("The tar file in the pod '%s' doesn't end with EOF", tcpdumpPod.ObjectMeta.Name))
-				log.Fatal(err)
+			log.Warn(fmt.Sprintf("Failed to build stream connection with the Pod '%s'.", tcpdumpPod.ObjectMeta.Name))
+			log.Fatal(err)
+		}
+		reader, outStream := io.Pipe()
+
+		go func() {
+			defer outStream.Close()
+			err = exec.Stream(remotecommand.StreamOptions{
+				Stdin:  os.Stdin,
+				Stdout: outStream,
+				Stderr: os.Stderr,
+				Tty:    false,
+			})
+		}()
+		tarReader := tar.NewReader(reader)
+		for {
+			_, err := tarReader.Next()
+			if err != nil {
+				if err != io.EOF {
+					log.Warn(fmt.Sprintf("The tar file in the pod '%s' doesn't end with EOF", tcpdumpPod.ObjectMeta.Name))
+					log.Fatal(err)
+					return err
+				}
+				break
+			}
+			destFileName := "./" + file + ".cap"
+			outFile, err := os.Create(destFileName)
+			if err != nil {
+				log.Warn(fmt.Sprintf("Error while creating the local dump file for pod '%s'", tcpdumpPod.ObjectMeta.Name))
+			}
+			defer outFile.Close()
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				log.Warn(fmt.Sprintf("Failed to copy the file %s due to '%s'", destFileName, err.Error()))
 				return err
 			}
-			break
-		}
-		destFileName := "./" + tcpdumpPod.Spec.Containers[0].Name + "-" + tcpdumpPod.ObjectMeta.Namespace + ".cap"
-		outFile, err := os.Create(destFileName)
-		if err != nil {
-			log.Warn(fmt.Sprintf("Error while creating the local dump file for pod '%s'", tcpdumpPod.ObjectMeta.Name))
-		}
-		defer outFile.Close()
-		if _, err := io.Copy(outFile, tarReader); err != nil {
-			log.Warn(fmt.Sprintf("Failed to copy the file %s due to '%s'", destFileName, err.Error()))
-			return err
-		}
-		if err := outFile.Close(); err != nil {
-			log.Warn(fmt.Sprintf("Failed to close the file %s due to '%s'", destFileName, err.Error()))
-			return err
+			if err := outFile.Close(); err != nil {
+				log.Warn(fmt.Sprintf("Failed to close the file %s due to '%s'", destFileName, err.Error()))
+				return err
+			}
 		}
 	}
-	return err
+
+	return nil
 }
 
 func cleanUp(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) error {
@@ -284,7 +319,7 @@ func cleanUp(client *kubernetes.Clientset, tcpdumpPod *apicore.Pod) error {
 	return err
 }
 
-func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, podManifest apicore.Pod, duration int, podOperationErr map[string]error) {
+func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *kubernetes.Clientset, podManifest apicore.Pod, duration int, podOperationErr map[string]error, pods []string) {
 	defer workerGroup.Done()
 	var tcpdumpPod *apicore.Pod
 	var err error
@@ -309,9 +344,9 @@ func podOperation(workerGroup *sync.WaitGroup, restConfig *rest.Config, client *
 			log.Warn(fmt.Sprintf("Timeout while waiting tcpdump for pod '%s' in the namespace '%s' to complete: %s", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace, err))
 			//log.Fatal(err)
 		} else {
-			err = downloadFromPod(restConfig, client, tcpdumpPod)
+			err = downloadFromPod(restConfig, client, tcpdumpPod, pods)
 			if err != nil {
-				log.Warn(fmt.Sprintf("Failed to download dump file from pod '%s' in the namespace '%s'", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace))
+				log.Warn(fmt.Sprintf("Failed to download dump file from pod '%s' in the namespace '%s': %s", tcpdumpPod.ObjectMeta.Name, tcpdumpPod.ObjectMeta.Namespace, err))
 			}
 		}
 		err = cleanUp(client, tcpdumpPod)
@@ -341,13 +376,18 @@ func Run(parFile string) {
 		log.Fatal(fmt.Sprintf("No pods are available to capture the network trace. Please check previous log. Exiting....."))
 	}
 	var containerdEndpoint, dockerEndpoint string
-	if inputTargets.RuntimeEndpoint["docker"] != "" {
-		dockerEndpoint = inputTargets.RuntimeEndpoint["docker"]
-	} else if inputTargets.RuntimeEndpoint["containerd"] != "" {
-		containerdEndpoint = inputTargets.RuntimeEndpoint["containerd"]
-	} else {
-		containerdEndpoint = "/run/containerd/containerd.sock"
-		dockerEndpoint = "/var/run/dockershim.sock"
+	containerdEndpoint = "/var/run/containerd/containerd.sock"
+	dockerEndpoint = "/var/run/dockershim.sock"
+	for _, runtime := range inputTargets.Runtimes {
+		log.Info(fmt.Sprintf("Runtime name is: %s and endpoint is: %s", runtime.Name, runtime.RuntimeEndpoint))
+		if runtime.Name == "docker" {
+			dockerEndpoint = runtime.RuntimeEndpoint
+			log.Info(fmt.Sprintf("endpoint of docker is %s: ", dockerEndpoint))
+		}
+		if runtime.Name == "containerd" {
+			containerdEndpoint = runtime.RuntimeEndpoint
+			log.Info(fmt.Sprintf("endpoint of containerd is: %s", containerdEndpoint))
+		}
 	}
 	temp := make([]byte, 2)
 	rand.Read(temp)
@@ -359,13 +399,12 @@ func Run(parFile string) {
 	if len(containerdFilteredTargetPods) > 0 {
 		containerdConfigMapName = "containerdconfigmap-" + suffix
 
-		containerdConfigMapData := targets{
+		containerdConfigMapData := targetPods{
 			Pods:            containerdFilteredTargetPods,
-			Runtime:         "containerd",
-			RuntimeEndpoint: inputTargets.RuntimeEndpoint,
 			Duration:        inputTargets.Duration,
+			Runtime:         "containerd",
+			RuntimeEndpoint: containerdEndpoint,
 		}
-
 		containerConfigMapDataByte, err := json.Marshal(containerdConfigMapData)
 		if err == nil {
 			containerdConfigMap := &apicore.ConfigMap{
@@ -395,11 +434,11 @@ func Run(parFile string) {
 	if len(dockerFilteredTargetPods) > 0 {
 		dockerConfigMapName = "dockerconfigmap-" + suffix
 
-		dockerdConfigMapData := targets{
+		dockerdConfigMapData := targetPods{
 			Pods:            dockerFilteredTargetPods,
-			Runtime:         "docker",
-			RuntimeEndpoint: inputTargets.RuntimeEndpoint,
 			Duration:        inputTargets.Duration,
+			Runtime:         "docker",
+			RuntimeEndpoint: dockerEndpoint,
 		}
 		dockerdConfigMapDataByte, err := json.Marshal(dockerdConfigMapData)
 		if err == nil {
@@ -457,10 +496,28 @@ func Run(parFile string) {
 	}
 	for _, pod := range podManifests {
 		workerGroup.Add(1)
-		go podOperation(&workerGroup, restConfig, client, pod, duration, podOperationErr)
+		pods := []string{}
+		for _, containerdFilteredTargetPod := range containerdFilteredTargetPods {
+			if pod.Spec.NodeSelector["kubernetes.io/hostname"] == containerdFilteredTargetPod.Node {
+				pods = append(pods, containerdFilteredTargetPod.Namespace+"-"+containerdFilteredTargetPod.Name)
+			}
+		}
+		for _, dockerFilteredTargetPod := range dockerFilteredTargetPods {
+			if pod.Spec.NodeSelector["kubernetes.io/hostname"] == dockerFilteredTargetPod.Node {
+				pods = append(pods, dockerFilteredTargetPod.Namespace+"-"+dockerFilteredTargetPod.Name)
+			}
+		}
+		go podOperation(&workerGroup, restConfig, client, pod, duration, podOperationErr, pods)
 	}
 	//fmt.Println("Wait for workers")
 	workerGroup.Wait()
 	//fmt.Println("All workers have completed")
+	err = client.CoreV1().ConfigMaps("default").DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{
+		LabelSelector: "run=" + labelValue,
+	})
+	log.Info(fmt.Sprintf("Cleanup the Configmaps with label: %s", "run="+labelValue))
+	if err != nil {
+		log.Error(fmt.Sprintf("Failed to clean up the configmaps due to: %s", err))
+	}
 	log.Info("All operations have been completed. EXIT now.")
 }
