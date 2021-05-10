@@ -1,15 +1,11 @@
 {
     "Pods": [
         {
-            "Name": "tunnelfront-6d5cd84fc6-p7gdb",
+            "Name": "kube-proxy-r2g4r",
             "Namespace": "kube-system"
         },
         {
-            "Name": "metrics-server-58fdc875d5-cnvml",
-            "Namespace": "kube-system"
-        },
-        {
-            "Name": "coredns-748cdb7bf4-jdxfm",
+            "Name": "tunnelfront-678bc45dfd-89srb",
             "Namespace": "kube-system"
         }
     ],

@@ -156,6 +156,7 @@ func generatePodManifest(runtimeEndpoint string, configMapName string, labelValu
 			Labels:    map[string]string{"run": labelValue},
 		},
 		Spec: apicore.PodSpec{
+			HostNetwork: true,
 			Volumes: []apicore.Volume{
 				{
 					Name: "targetpodsjson",
