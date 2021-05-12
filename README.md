@@ -11,5 +11,8 @@ The tool is to use the 'tcpdump' to capture the network trace of the pod
 
 
 ### Usage:
+
+![](https://github.com/Shuanglu/k8sTcpdump/blob/main/doc/k8sTcpdump.gif)
+
 1. Input the "name" of the pod and "namespace" of the pod to the "xxx.json". Example is "example/test.json"
 2. Run "./k8sTcpdump -p xxx.json" and it will bring up pods on the corresponding nodes to capture the network traces of the target pods. The '.cap' file will be downoaded to the current folder.
